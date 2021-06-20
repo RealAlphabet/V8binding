@@ -1,0 +1,22 @@
+# Ignore everything
+*
+!*/
+
+# Expect sources
+!*.cc
+!*.c
+!*.h
+!*.a
+
+# Except scripts
+!*.sh
+!*.js
+
+# Except Git
+!.gitignore
+
+# Expect Makefile
+!Makefile
+
+# In subdirectories
+!*/
