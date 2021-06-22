@@ -1,8 +1,20 @@
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <fcntl.h>
 #include "../include/v8c.h"
+
+
+
+///////////////////////////////////
+//  TYPES
+///////////////////////////////////
+
+
+typedef struct
+{
+    v8_value_t      callback;
+} queue_t;
 
 
 ///////////////////////////////////
@@ -46,22 +58,27 @@ char *read_file(const char *path)
 void func_println(v8_callback_info_t cb_info, int argc, void *data)
 {
     char buf[1024];
-    size_t bufsize;
-    v8_value_t value = NULL;
+    v8_value_t value;
 
     // Get first argument.
-    v8_callback_get_args(cb_info, &value, 1);
+    v8_get_callback_args(cb_info, &value, 1);
 
     // Transform value to C string.
-    v8_get_utf8(value, buf, 1024, &bufsize);
+    v8_get_utf8(value, buf, 1024);
 
     // Put string in console.
-    puts(buf);
+    // puts(buf);
 }
 
-void func_ak(v8_callback_info_t cb_info, int argc, void *data)
+void func_schedule(v8_callback_info_t cb_info, int argc, queue_t *data)
 {
-    printf("TU TAI FAI AK!\n");
+    v8_value_t callback;
+
+    // Get callback value.
+    v8_get_callback_args(cb_info, &callback, argc);
+
+    // Create a persistent reference to the callback.
+    data->callback = v8_create_ref(callback);
 }
 
 
@@ -70,30 +87,25 @@ void func_ak(v8_callback_info_t cb_info, int argc, void *data)
 ///////////////////////////////////
 
 
-void on_context_start(void *data)
+void on_context_start(v8_value_t global, void *data)
 {
-    char *script = read_file("script.js");
+    queue_t queue   = { 0 };
+    char *script    = read_file("script.js");
 
-    v8_value_t global;
-    v8_value_t val_println;
-    v8_value_t val_ak;
-    v8_value_t val_version;
-
-    // Create builtins functions.
-    v8_create_function(&val_println, func_println, NULL);
-    v8_create_function(&val_ak, func_ak, NULL);
-
-    // Create builtins getter.
-    v8_create_string_utf8(&val_version, "AKING V1.0", 11);
-
-    // Create a global template and define builtins.
-    v8_create_global(&global);
-    v8_set_global(global, "println", val_println);
-    v8_set_global(global, "ak", val_ak);
-    v8_set_global(global, "version", val_version);
+    // Set global object properties.
+    v8_set_obj_var(global, "println"         , v8_create_function((v8_callback_info_t)func_println, NULL));
+    v8_set_obj_var(global, "scheduleTicks"   , v8_create_function((v8_callback_info_t)func_schedule, &queue));
 
     // Run script.
-    v8_script_run(global, script);
+    v8_script_run(script);
+
+    // Get local value i don't know why but if the element is not referenced it is been freed by the garbage collector, OOF.
+    v8_value_t callback = v8_get_ref_value(queue.callback);
+
+    while (1) {
+        // Call callback.
+        v8_call_function(callback, NULL, 0);
+    }
 
     // Free script.
     free(script);

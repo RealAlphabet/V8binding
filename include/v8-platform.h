@@ -170,6 +170,19 @@ class JobDelegate {
    * details.
    */
   virtual void NotifyConcurrencyIncrease() = 0;
+
+  /**
+   * Returns a task_id unique among threads currently running this job, such
+   * that GetTaskId() < worker count. To achieve this, the same task_id may be
+   * reused by a different thread after a worker_task returns.
+   */
+  virtual uint8_t GetTaskId() = 0;
+
+  /**
+   * Returns true if the current task is called from the thread currently
+   * running JobHandle::Join().
+   */
+  virtual bool IsJoiningThread() const = 0;
 };
 
 /**
@@ -202,11 +215,34 @@ class JobHandle {
    */
   virtual void Cancel() = 0;
 
+  /*
+   * Forces all existing workers to yield ASAP but doesn’t wait for them.
+   * Warning, this is dangerous if the Job's callback is bound to or has access
+   * to state which may be deleted after this call.
+   */
+  virtual void CancelAndDetach() = 0;
+
+  /**
+   * Returns true if there's any work pending or any worker running.
+   */
+  virtual bool IsActive() = 0;
+
   /**
    * Returns true if associated with a Job and other methods may be called.
-   * Returns false after Join() or Cancel() was called.
+   * Returns false after Join() or Cancel() was called. This may return true
+   * even if no workers are running and IsCompleted() returns true
    */
-  virtual bool IsRunning() = 0;
+  virtual bool IsValid() = 0;
+
+  /**
+   * Returns true if job priority can be changed.
+   */
+  virtual bool UpdatePriorityEnabled() const { return false; }
+
+  /**
+   *  Update this Job's priority.
+   */
+  virtual void UpdatePriority(TaskPriority new_priority) {}
 };
 
 /**
@@ -219,12 +255,13 @@ class JobTask {
   virtual void Run(JobDelegate* delegate) = 0;
 
   /**
-   * Controls the maximum number of threads calling Run() concurrently. Run() is
-   * only invoked if the number of threads previously running Run() was less
-   * than the value returned. Since GetMaxConcurrency() is a leaf function, it
-   * must not call back any JobHandle methods.
+   * Controls the maximum number of threads calling Run() concurrently, given
+   * the number of threads currently assigned to this job and executing Run().
+   * Run() is only invoked if the number of threads previously running Run() was
+   * less than the value returned. Since GetMaxConcurrency() is a leaf function,
+   * it must not call back any JobHandle methods.
    */
-  virtual size_t GetMaxConcurrency() const = 0;
+  virtual size_t GetMaxConcurrency(size_t worker_count) const = 0;
 };
 
 /**
@@ -357,9 +394,14 @@ class PageAllocator {
     kNoAccess,
     kRead,
     kReadWrite,
-    // TODO(hpayer): Remove this flag. Memory should never be rwx.
     kReadWriteExecute,
-    kReadExecute
+    kReadExecute,
+    // Set this when reserving memory that will later require kReadWriteExecute
+    // permissions. The resulting behavior is platform-specific, currently
+    // this is used to set the MAP_JIT flag on Apple Silicon.
+    // TODO(jkummerow): Remove this when Wasm has a platform-independent
+    // w^x implementation.
+    kNoAccessWillJitLater
   };
 
   /**
@@ -391,6 +433,69 @@ class PageAllocator {
    * memory area brings the memory transparently back.
    */
   virtual bool DiscardSystemPages(void* address, size_t size) { return true; }
+
+  /**
+   * INTERNAL ONLY: This interface has not been stabilised and may change
+   * without notice from one release to another without being deprecated first.
+   */
+  class SharedMemoryMapping {
+   public:
+    // Implementations are expected to free the shared memory mapping in the
+    // destructor.
+    virtual ~SharedMemoryMapping() = default;
+    virtual void* GetMemory() const = 0;
+  };
+
+  /**
+   * INTERNAL ONLY: This interface has not been stabilised and may change
+   * without notice from one release to another without being deprecated first.
+   */
+  class SharedMemory {
+   public:
+    // Implementations are expected to free the shared memory in the destructor.
+    virtual ~SharedMemory() = default;
+    virtual std::unique_ptr<SharedMemoryMapping> RemapTo(
+        void* new_address) const = 0;
+    virtual void* GetMemory() const = 0;
+    virtual size_t GetSize() const = 0;
+  };
+
+  /**
+   * INTERNAL ONLY: This interface has not been stabilised and may change
+   * without notice from one release to another without being deprecated first.
+   *
+   * Reserve pages at a fixed address returning whether the reservation is
+   * possible. The reserved memory is detached from the PageAllocator and so
+   * should not be freed by it. It's intended for use with
+   * SharedMemory::RemapTo, where ~SharedMemoryMapping would free the memory.
+   */
+  virtual bool ReserveForSharedMemoryMapping(void* address, size_t size) {
+    return false;
+  }
+
+  /**
+   * INTERNAL ONLY: This interface has not been stabilised and may change
+   * without notice from one release to another without being deprecated first.
+   *
+   * Allocates shared memory pages. Not all PageAllocators need support this and
+   * so this method need not be overridden.
+   * Allocates a new read-only shared memory region of size |length| and copies
+   * the memory at |original_address| into it.
+   */
+  virtual std::unique_ptr<SharedMemory> AllocateSharedPages(
+      size_t length, const void* original_address) {
+    return {};
+  }
+
+  /**
+   * INTERNAL ONLY: This interface has not been stabilised and may change
+   * without notice from one release to another without being deprecated first.
+   *
+   * If not overridden and changed to return true, V8 will not attempt to call
+   * AllocateSharedPages or RemapSharedPages. If overridden, AllocateSharedPages
+   * and RemapSharedPages must also be overridden.
+   */
+  virtual bool CanAllocateSharedPages() { return false; }
 };
 
 /**
@@ -540,9 +645,7 @@ class Platform {
    * }
    */
   virtual std::unique_ptr<JobHandle> PostJob(
-      TaskPriority priority, std::unique_ptr<JobTask> job_task) {
-    return nullptr;
-  }
+      TaskPriority priority, std::unique_ptr<JobTask> job_task) = 0;
 
   /**
    * Monotonically increasing time in seconds from an arbitrary fixed point in

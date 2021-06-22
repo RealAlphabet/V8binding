@@ -3,7 +3,7 @@
 ## Makefile
 ##
 
-SRC         =   src/v8.cc
+SRC         =   $(shell find src -name *.cc)
 
 OBJ         =   $(SRC:.cc=.o)
 
@@ -11,16 +11,19 @@ NAME        =   libv8c.so
 
 CXXFLAGS    =   -Wall                   \
                 -W                      \
-                -Iinclude               \
                 -Wno-unused-parameter   \
+                -Iinclude               \
                 -fPIC                   \
-                -DV8_COMPRESS_POINTERS -O3
+                -DV8_COMPRESS_POINTERS  \
+                -g
 
 LDFLAGS     =   -shared                                                     \
+                -Llibs                                                      \
                 -lstdc++                                                    \
                 -lpthread                                                   \
-                -Wl,--whole-archive libs/libv8.a -Wl,--no-whole-archive     \
-                -Wl,--exclude-libs,ALL -Wl,--gc-sections -Wl,--strip-all
+                -lv8                                                        \
+                -ldl                                                        \
+                -lm
 
 all:    $(NAME)
 
